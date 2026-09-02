@@ -1,93 +1,332 @@
-# Homework 3 - Incident Radar
+# Проект 3. Incident Radar
 
-CLI-утилита читает NGINX-логи из файла, glob-маски или URL, фильтрует записи по датам и строит отчёт.
+CLI-утилита для анализа NGINX-логов. Читает логи (файлы, glob-маски или URL),
+разбирает строки, фильтрует по датам и строит отчёт со статистикой.
 
-## Getting started
+Одна строка лога выглядит так:
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
-
-```
-cd existing_repo
-git remote add origin https://gitlab.education.tbank.ru/t-academy-2026/java/templates/homework-3-incident-radar.git
-git branch -M master
-git push -uf origin master
+```text
+93.180.71.3 - - [17/May/2015:08:05:32 +0000] "GET /downloads/product_1 HTTP/1.1" 304 0 "-" "Debian APT-HTTP/1.3"
 ```
 
-## Integrate with your tools
+Из неё утилита достаёт IP, дату, метод, ресурс, код ответа и размер ответа.
+А из миллиона таких строк собирает картину: сколько запросов, какие endpoint'ы
+популярны, сколько ошибок, какие ответы самые тяжёлые.
 
-* [Set up project integrations](https://gitlab.education.tbank.ru/t-academy-2026/java/templates/homework-3-incident-radar/-/settings/integrations)
+Здесь впервые появляются «взрослые» требования: файл может быть гигантским
+(читаем потоково), строки бывают битыми (пропускаем, а не падаем), а утилиту
+будут запускать скрипты (значит, нужны честные коды возврата).
 
-## Collaborate with your team
+Задание разбито на три merge request'а. Делай их по очереди.
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+---
 
-## Test and Deploy
+## MR1 — CLI и источники логов
 
-Use the built-in continuous integration in GitLab.
+```text
+incident-radar --path logs/*.log --output-format markdown --output-path report.md --from 2025-03-01
+```
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+Параметры:
 
-***
+```text
+--path, -p             файл, glob-маска или URL (обязателен)
+--output-format, -f    json или markdown
+--output-path, -o      путь для отчёта
+--from / --to          границы периода (необязательны)
+```
 
-# Editing this README
+Поддерживаемые расширения: `.log`, `.txt`.
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+**Чтение потоковое, без загрузки файла в память целиком.**
+`Files.readAllLines()` на гигабайтном файле кладёт процесс. Нужен
+`Files.lines()` или `BufferedReader`, а по сети —
+`HttpResponse.BodyHandlers.ofLines()`.
 
-## Suggestions for a good README
+Инварианты: файл существует, URL доступен, формат поддержан, расширение
+output-файла соответствует формату, при обеих заданных датах `from < to`.
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+---
 
-## Name
-Choose a self-explaining name for your project.
+## MR2 — Парсер и статистика
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+Формат строки:
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+```text
+$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent"
+```
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+- разбор в модель `LogRecord`; метод, ресурс и протокол — **три разных поля**
+  из `"GET /downloads/product_1 HTTP/1.1"`;
+- **битая строка — ожидаемый сценарий**: пропускаем, пишем
+  `WARN: skipped malformed log line`, работу не останавливаем;
+- фильтрация по датам: заданы обе → период включительно, одна → открытая
+  граница, ни одной → все записи;
+- статистика: общее число запросов, распределение кодов ответа, top-10
+  ресурсов, размер ответа — average / max / p95. Дробные значения —
+  2 знака после запятой.
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+### Про p95
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+Способов посчитать перцентиль несколько, и они дают разные ответы. На готовых
+сэмплах из проекта:
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+| Метод | p95 |
+|---|---|
+| Nearest rank, `ceil(0.95 * n)` | 5450 |
+| Линейная интерполяция | 5450.20 |
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+Оба правильные. **Нужно выбрать один и описать его** в README или в тестах.
+Именно из-за этой неоднозначности цифры p95 у разных систем мониторинга
+не сходятся.
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+---
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+## MR3 — Отчёты и коды возврата
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+- отчёты в JSON и Markdown, сохранение в файл;
+- защита от случайной перезаписи: существующий output-файл — ошибка;
+- коды возврата:
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+```text
+0 -> успех
+1 -> непредвиденная ошибка
+2 -> некорректное использование (нет --path, файл не найден, URL вернул 404,
+     неверный формат, from >= to, output уже существует, ...)
+```
 
-## License
-For open source projects, say how it is licensed.
+Различать `1` и `2` важно: по коду `2` вызывающий скрипт понимает, что виноват
+он сам, а по коду `1` — что упала программа.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+JSON-отчёт содержит: `files`, `totalRequestsCount`, `responseSizeInBytes`
+(average/max/p95), `resources`, `responseCodes`. Markdown — те же данные
+таблицами с заголовком.
+
+---
+
+## Обязательные тесты
+
+Заготовки лежат в `src/test/java/academy/incidentradar/mandatory/`, разложены
+по merge request'ам. Реализовать нужно все.
+
+| Область | Что проверяем |
+|---|---|
+| Валидация CLI | нет `--path`, `--output-format xml`, `from >= to` → exit code 2 |
+| Источники | локальный файл, glob-маска, URL; URL 404 → exit code 2 |
+| Парсинг | эталонная строка → `method=GET`, `resource=/downloads/product_1`, `status=304`, ... |
+| Битая строка | пропущена, warning есть, программа не падает |
+| Фильтр дат | только `--from`, только `--to`, оба, без фильтра |
+| Коды ответа | `200,200,404,500,500,500` → `200:2, 404:1, 500:3` |
+| Top resources | сортировка по убыванию количества |
+| Размеры | `100..500` → average 300, max 500, p95 500 |
+| Отчёты | JSON валиден и полон; Markdown содержит заголовок и таблицы |
+| Output | существующий файл → ошибка; расширение соответствует формату |
+
+Каждая заготовка выглядит так:
+
+```java
+@Test
+@Disabled("MR2: реализуй тест и удали эту строку")
+@DisplayName("Битая строка пропускается с warning'ом, программа не падает")
+void malformedLineIsSkippedWithWarning() {
+    fail("Тест не реализован");
+}
+```
+
+Удали строку `@Disabled(...)` и замени `fail(...)` на настоящую проверку.
+Названия методов и `@DisplayName` менять не нужно — по ним ментор сверяется
+с требованиями. Свои тесты добавлять можно и нужно, удалять обязательные — нет.
+
+`@Disabled` означает «пропущен», а не «упал», поэтому сборка зелёная с самого
+начала: иначе на MR1 всё было бы красным из-за тестов MR3, и стало бы непонятно,
+сломал ты что-то или нет.
+
+---
+
+## Баллы
+
+| За что | Баллы |
+|---|---|
+| MR1: CLI, локальные файлы, glob, URL, валидация | 27 |
+| MR2: парсер, фильтр дат, статистика | 37 |
+| MR3: JSON/Markdown-отчёты, exit codes, blackbox-тесты | 23 |
+| Обязательные тесты | 10 |
+| README | 3 |
+| **Итого база** | **100** |
+
+**Бонусы (до 25):** отчёт в формате `adoc` (5), распределение запросов
+по дням недели (5), сравнение двух периодов логов (5), названия HTTP-кодов
+в Markdown-отчёте, например `200 OK` (4), вывод отчёта в stdout
+без `--output` (3), уникальные протоколы передачи данных (3).
+
+**Максимум: 125.**
+
+---
+
+## Что делать НЕ нужно
+
+GUI, веб-сервис, база данных, полноценный аналог ELK, realtime-дашборды,
+авторизация, поддержка всех форматов логов, идеально точный streaming p95
+для огромных данных.
+
+---
+
+# Работа с шаблоном
+
+## Что установить
+
+Нужен только **JDK 21 или новее** и любая свежая IntelliJ IDEA
+(Community Edition хватает). Gradle ставить не нужно — в проекте лежит
+`gradlew`, он скачает нужную версию сам.
+
+Проверить версию Java: `java -version`. Если она ниже 21, сборка остановится
+с понятным сообщением.
+
+## Запуск
+
+```bash
+# Linux и macOS
+./gradlew build
+./gradlew run
+
+# Windows
+.\gradlew.bat build
+.\gradlew.bat run
+```
+
+Первая сборка занимает пару минут — Gradle качает себя и зависимости.
+Дальше секунды.
+
+Дальше в README команды написаны как `./gradlew`. На Windows подставляй
+`.\gradlew.bat`.
+
+## Команды
+
+| Команда | Что делает |
+|---|---|
+| `./gradlew run --args="..."` | Запустить с аргументами |
+| `./gradlew test` | Прогнать тесты |
+| `./gradlew check` | Тесты и линтеры — то же, что проверяет CI |
+| `./gradlew spotlessApply` | Отформатировать код |
+| `./gradlew clean` | Удалить результаты сборки |
+
+Примеры на готовых сэмплах:
+
+```bash
+# Один файл
+./gradlew run --args="--path samples/logs/access-2025-03-01.log --output-format markdown --output-path report.md"
+
+# Оба файла по маске (кавычки обязательны, иначе маску раскроет сама оболочка)
+./gradlew run --args="--path 'samples/logs/access-*.log' --output-format json --output-path report.json"
+
+# С фильтром по датам
+./gradlew run --args="--path 'samples/logs/access-*.log' --from 2025-03-02 --output-format markdown --output-path day2.md"
+```
+
+## Настройка IDEA
+
+1. Открыть папку проекта — Gradle подхватится сам.
+2. **Settings → Build Tools → Gradle → Gradle JVM** — выбрать JDK 21+.
+3. **Settings → Build Tools → Gradle → Run tests using → Gradle.**
+
+Третий пункт обязателен: тесты на коды возврата запускают программу отдельным
+процессом и получают нужные параметры от Gradle.
+
+## Что уже готово в шаблоне
+
+| Что | Где |
+|---|---|
+| Сэмплы логов: 3000 строк, два дня, битые строки, эталоны | `samples/logs/` |
+| Известная статистика по сэмплам для самопроверки | `samples/logs/README.md` |
+| Заготовки обязательных тестов | `src/test/java/.../mandatory/` |
+| `CliRunner` — запускает программу и отдаёт код возврата | `src/test/java/.../support/` |
+| Настроенные линтеры и CI | `config/`, `.gitlab-ci.yml` |
+| Шаблоны описаний merge request'ов | `.gitlab/merge_request_templates/` |
+
+**Обязательно загляни в `samples/logs/README.md`** — там лежит уже посчитанная
+статистика по сэмплам (3000 запросов, распределение кодов, top-10 ресурсов),
+и с ней можно сверять свою реализацию.
+
+Свои классы складывай в `src/main/java/academy/incidentradar/`. Как разложить
+их по пакетам — решать тебе, это часть задания.
+
+## Проверка кода
+
+```bash
+./gradlew check
+```
+
+Ровно эту команду запускает CI. Работают четыре инструмента:
+
+- **Spotless** — форматирование. Руками отступы не правь, запусти
+  `./gradlew spotlessApply`, и он всё сделает сам.
+- **Checkstyle** — именование, структура, типичные ошибки. Отчёт:
+  `build/reports/checkstyle/main.html`
+- **SpotBugs** — настоящие баги: разыменование `null`, незакрытые ресурсы,
+  сравнение строк через `==`. Отчёт: `build/reports/spotbugs/main.html`
+- **JaCoCo** — покрытие тестами. Отчёт:
+  `build/reports/jacoco/test/html/index.html`
+
+Если правило мешает в конкретном месте, подави его точечно —
+`@SuppressWarnings("checkstyle:MagicNumber")` — но не отключай в конфиге:
+такая правка видна в merge request'е, и ментор о ней спросит.
+
+## Библиотеки
+
+Все одобренные библиотеки перечислены в `gradle/libs.versions.toml`.
+Чтобы подключить, добавь строку в `dependencies` в `build.gradle.kts`:
+
+```kotlin
+implementation(libs.picocli)
+```
+
+Версию указывать не нужно.
+
+Уже подключены: **picocli** (разбор аргументов, `--help`, коды возврата),
+**Jackson** (JSON-отчёт), **SLF4J + Logback** (логирование),
+**JUnit 5 + AssertJ** (тесты).
+
+HTTP-клиента в списке нет намеренно: чтение лога по URL делается стандартным
+`java.net.http.HttpClient`, который умеет отдавать тело потоком.
+
+**Добавлять библиотеки, которых нет в каталоге, — только по согласованию
+с ментором.**
+
+## Как сдавать
+
+Три merge request'а, по одному на этап. При создании MR выбери шаблон описания
+в списке **Description → Choose a template** — там уже готов чеклист.
+
+Перед отправкой прогони у себя:
+
+```bash
+./gradlew spotlessApply check
+```
+
+К MR3 приложи пример отчёта. Если реализовал что-то из бонусов — перечисли это
+в описании MR, иначе баллы не начислятся.
+
+## Если что-то не работает
+
+**Ошибка про версию Java.** Стоит JDK старее 21. IDEA использует свой JDK
+из настроек Gradle, а не тот, что в `JAVA_HOME`.
+
+**`./gradlew: Permission denied`** (Linux, macOS) — `chmod +x ./gradlew`
+
+**Glob-маска раскрывается неправильно.** Оболочка раскрывает `*` сама,
+до запуска программы. Заключай маску в одинарные кавычки:
+`--path 'samples/logs/access-*.log'`.
+
+**Кракозябры вместо русских букв в консоли Windows.** В `cmd` выполни
+`chcp 65001` перед запуском, в PowerShell —
+`[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`.
+В IDEA такой проблемы нет.
+
+**Тест падает с «Не задано системное свойство academy.cli.classpath».**
+Тест запущен в обход Gradle — включи в IDEA
+**Settings → Build Tools → Gradle → Run tests using → Gradle**.
+
+**Spotless ругается, а что не так — непонятно.** Не разбирайся, запусти
+`./gradlew spotlessApply`.
+
+**Что-то другое.** Приложи к вопросу вывод `./gradlew check --stacktrace`.
