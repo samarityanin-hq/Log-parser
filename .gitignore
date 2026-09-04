@@ -20,6 +20,8 @@ Thumbs.db
 desktop.ini
 
 *.log
+# Сэмплы логов — данные задания, а не мусор сборки.
+!samples/logs/*.log
 *.hprof
 hs_err_pid*
 replay_pid*
