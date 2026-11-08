@@ -17,9 +17,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public final class RemoteReader {
+    private static final int TIMEOUT = 10;
     private static final HttpClient CLIENT = HttpClient.newBuilder()
             .followRedirects(HttpClient.Redirect.NORMAL)
-            .connectTimeout(Duration.ofSeconds(10))
+            .connectTimeout(Duration.ofSeconds(TIMEOUT))
             .build();
     private static final int SUCCESSFUL = 200;
     private static final int REDIRECTION = 300;
@@ -57,7 +58,7 @@ public final class RemoteReader {
 
     private static HttpRequest sendRequest(URI uri) {
         return HttpRequest.newBuilder()
-                .timeout(Duration.ofSeconds(10))
+                .timeout(Duration.ofSeconds(TIMEOUT))
                 .uri(uri)
                 .GET()
                 .build();
